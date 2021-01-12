@@ -13,6 +13,7 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -32,7 +33,7 @@ int main(int argc, const char *argv[])
     printf("You need to specify a media file.\n");
     return -1;
   }
-  
+
   logging("initializing all the containers, codecs and protocols.");
 
   // AVFormatContext holds the header information from the format (Container)
@@ -163,6 +164,7 @@ int main(int argc, const char *argv[])
     logging("failed to allocated memory for AVFrame");
     return -1;
   }
+
   // https://ffmpeg.org/doxygen/trunk/structAVPacket.html
   AVPacket *pPacket = av_packet_alloc();
   if (!pPacket)
@@ -244,10 +246,40 @@ static int decode_packet(AVPacket *pPacket, AVCodecContext *pCodecContext, AVFra
           pFrame->coded_picture_number
       );
 
+      // Allocate a frame for scaling; scaling with a factor 4, keeping the same format
+      // Of course it is also possible to allocate a single frame and create a single context in e.g. main() and keep using
+      // those instead of creating them over and over again
+      AVFrame *scaledFrame = av_frame_alloc();
+      scaledFrame->format = pCodecContext->pix_fmt;
+      scaledFrame->width = pCodecContext->width/4;
+      scaledFrame->height = pCodecContext->height/4;
+      av_frame_get_buffer(scaledFrame, 8);
+
+      // Create context for scaling
+      // https://ffmpeg.org/doxygen/trunk/group__libsws.html#gaf360d1a9e0e60f906f74d7d44f9abfdd
+      struct SwsContext *sws_ctx = sws_getContext(pCodecContext->width, pCodecContext->height, pCodecContext->pix_fmt,
+                                  scaledFrame->width, scaledFrame->height, scaledFrame->format, SWS_BILINEAR, NULL, NULL, NULL);
+      if (!sws_ctx)
+      {
+        logging("failed to allocate context for scaling");
+          return -1;
+      }
+
+      // https://ffmpeg.org/doxygen/trunk/group__libsws.html#gae531c9754c9205d90ad6800015046d74
+      sws_scale(sws_ctx, (uint8_t const *const *)pFrame->data, pFrame->linesize, 0, pFrame->height, scaledFrame->data, scaledFrame->linesize);
+
+      // write output files
       char frame_filename[1024];
       snprintf(frame_filename, sizeof(frame_filename), "%s-%d.pgm", "frame", pCodecContext->frame_number);
       // save a grayscale frame into a .pgm file
       save_gray_frame(pFrame->data[0], pFrame->linesize[0], pFrame->width, pFrame->height, frame_filename);
+
+      snprintf(frame_filename, sizeof(frame_filename), "%s-%d_scaled.pgm", "frame", pCodecContext->frame_number);
+      // save a scaled grayscale frame into a .pgm file
+      save_gray_frame(scaledFrame->data[0], scaledFrame->linesize[0], scaledFrame->width, scaledFrame->height, frame_filename);
+
+      // and release the frame
+      av_frame_free(&scaledFrame);
     }
   }
   return 0;
